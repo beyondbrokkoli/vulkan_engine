@@ -1,60 +1,37 @@
 AzureAD+HalimOmarZaghdoudi@DESKTOP-BD3FFTI MINGW64 ~/vulkan_engine
-$ lua build_orchestrator.lua win
-========================================
-   VULKAN ENGINE BUILD ORCHESTRATOR
-   Target Platform: WIN
-========================================
-
-[1/3] Compiling SPIR-V Shaders...
-
-[2/3] Compiling Vulkan-Engine.exe (Monolithic AVX2 Host) ...
-
-[3/3] Packing Windows Dependencies (DLLs)...
-  |- DLLs copied successfully.
-
-[SUCCESS] Engine build complete!
-
-
---- AI SNAPSHOT ---
-@@@ FILE: main.lua @@@
-local ffi = require("ffi"); ffi.cdef[[; int vibe_get_is_running();; int vibe_publish_and_get_next_buffer();; void vibe_trigger_shutdown();; void vibe_mark_lua_finished();; // The Handshake Hooks; const char** vibe_get_glfw_extensions(uint32_t* count);; void vibe_publish_vk_instance(void* instance);; void* vibe_get_vk_surface();; ]]; print("[LUA VM] Entering Lock-Free Horizon."); local active_coroutines = {}; local function start_coroutine(func); table.insert(active_coroutines, coroutine.create(func)); end; local current_write_idx = 2; local function vulkan_bootstrap_coroutine(); print("[LUA CO] Bootstrapping Vulkan..."); local pCount = ffi.new("uint32_t[1]"); local glfwExtensions = ffi.C.vibe_get_glfw_extensions(pCount); print(string.format("[LUA CO] Received %d GLFW Extensions from C.", pCount[0])); local fake_instance = ffi.cast("void*", 0xDEADBEEF); print("[LUA CO] Publishing VkInstance to C. Waiting for Window Surface..."); ffi.C.vibe_publish_vk_instance(fake_instance); local surface_ptr = nil; while true do; surface_ptr = ffi.C.vibe_get_vk_surface(); if surface_ptr ~= nil then; break; end; coroutine.yield(); end; print("[LUA CO] Window Surface Acquired! Resuming Pipeline Generation..."); local i = 0; while ffi.C.vibe_get_is_running() == 1 do; i = i + 1; current_write_idx = ffi.C.vibe_publish_and_get_next_buffer(); if i == 200 then; print("\n[LUA CO] Reached 200 iterations! Triggering C-Side Teardown..."); ffi.C.vibe_trigger_shutdown(); end; coroutine.yield(); end; end; start_coroutine(vulkan_bootstrap_coroutine); while ffi.C.vibe_get_is_running() == 1 do; for i = #active_coroutines, 1, -1 do; local co = active_coroutines[i]; if coroutine.status(co) ~= "dead" then; local success, err = coroutine.resume(co); assert(success, "FATAL: COROUTINE CRASHED: " .. tostring(err)); else; table.remove(active_coroutines, i); end; end; end; print("[LUA VM] Exiting gracefully..."); ffi.C.vibe_mark_lua_finished()
-@@@ FILE: main.c @@@
-#include <stdio.h>
-#include <stdlib.h>
-#include <stdint.h>
-#include <stdbool.h>
-#include <stdatomic.h>
-#include <stdalign.h>
-#define GLFW_INCLUDE_VULKAN
-#include <GLFW/glfw3.h>
-#include <lua.h>
-#include <lualib.h>
-#include <lauxlib.h>
-#ifdef _WIN32
-#define EXPORT __declspec(dllexport)
-#include <windows.h>
-#define SLEEP_MS(ms) Sleep(ms)
-typedef HANDLE vmath_thread_t; #define THREAD_FUNC DWORD WINAPI
-#define THREAD_RETURN_VAL 0
-static vmath_thread_t vmath_thread_start(DWORD (WINAPI *func)(LPVOID), void* arg) { return CreateThread(NULL, 0, func, arg, 0, NULL); } static void vmath_thread_join(vmath_thread_t thread) { WaitForSingleObject(thread, INFINITE); CloseHandle(thread); } #else
-#define EXPORT __attribute__((visibility("default")))
-#include <pthread.h>
-#include <unistd.h>
-#define SLEEP_MS(ms) usleep((ms) * 1000)
-typedef pthread_t vmath_thread_t; #define THREAD_FUNC void*
-#define THREAD_RETURN_VAL NULL
-static vmath_thread_t vmath_thread_start(void* (*func)(void*), void* arg) { pthread_t thread; pthread_create(&thread, NULL, func, arg); return thread; } static void vmath_thread_join(vmath_thread_t thread) { pthread_join(thread, NULL); } #endif
-typedef struct { alignas(64) _Atomic int ready_index; _Atomic int is_running; _Atomic int lua_finished; _Atomic(void*) vk_instance; _Atomic(void*) vk_surface; } IPC_Mailbox; typedef struct { IPC_Mailbox mailbox; int render_index; int write_index; } EngineState; static EngineState g_engine; EXPORT int vibe_get_is_running() { return atomic_load_explicit(&g_engine.mailbox.is_running, memory_order_relaxed); } EXPORT int vibe_publish_and_get_next_buffer() { g_engine.write_index = atomic_exchange_explicit( &g_engine.mailbox.ready_index, g_engine.write_index, memory_order_release ); return g_engine.write_index; } EXPORT void vibe_trigger_shutdown() { atomic_store_explicit(&g_engine.mailbox.is_running, 0, memory_order_release); } EXPORT void vibe_mark_lua_finished() { atomic_store_explicit(&g_engine.mailbox.lua_finished, 1, memory_order_release); } EXPORT const char** vibe_get_glfw_extensions(uint32_t* count) { return glfwGetRequiredInstanceExtensions(count); } EXPORT void vibe_publish_vk_instance(void* instance) { atomic_store_explicit(&g_engine.mailbox.vk_instance, instance, memory_order_release); } EXPORT void* vibe_get_vk_surface() { return atomic_load_explicit(&g_engine.mailbox.vk_surface, memory_order_acquire); } void vibe_init_mailbox() { atomic_init(&g_engine.mailbox.ready_index, 0); atomic_init(&g_engine.mailbox.is_running, 1); atomic_init(&g_engine.mailbox.lua_finished, 0); atomic_init(&g_engine.mailbox.vk_instance, NULL); atomic_init(&g_engine.mailbox.vk_surface, NULL); g_engine.render_index = 1; g_engine.write_index = 2; } void vibe_acquire_newest_frame() { g_engine.render_index = atomic_exchange_explicit( &g_engine.mailbox.ready_index, g_engine.render_index, memory_order_acquire ); } THREAD_FUNC lua_co_overlord_loop(void* arg) { printf("[LUA-OS-THREAD] Booting Lua VM...\n"); lua_State* L = luaL_newstate(); luaL_openlibs(L); if (luaL_dofile(L, "main.lua") != LUA_OK) { printf("\n[LUA FATAL ERROR] %s\n", lua_tostring(L, -1)); } lua_close(L); printf("[LUA-OS-THREAD] VM Destroyed.\n"); return THREAD_RETURN_VAL; } int main(int argc, char** argv) { printf("[C-CORE] Booting Minified Concurrent Pipeline...\n"); if (!glfwInit()) return -1; glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API); glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE); GLFWwindow* window = glfwCreateWindow(1280, 720, "Lock-Free Swarm", NULL, NULL); vibe_init_mailbox(); vmath_thread_t lua_thread = vmath_thread_start(lua_co_overlord_loop, NULL); int frame_count = 0; bool surface_created = false; while (vibe_get_is_running()) { glfwPollEvents(); if (glfwWindowShouldClose(window)) { vibe_trigger_shutdown(); } if (!surface_created) { void* instance = atomic_load_explicit(&g_engine.mailbox.vk_instance, memory_order_acquire); if (instance != NULL) { VkSurfaceKHR surface; if (glfwCreateWindowSurface((VkInstance)instance, window, NULL, &surface) == VK_SUCCESS) { atomic_store_explicit(&g_engine.mailbox.vk_surface, (void*)surface, memory_order_release); surface_created = true; printf("[C-CORE] Window Surface Created & Published to Lua!\n"); } else { printf("[C-FATAL] Failed to create Vulkan Surface.\n"); vibe_trigger_shutdown(); } } } vibe_acquire_newest_frame(); if (frame_count % 30 == 0) { } frame_count++; SLEEP_MS(16); } printf("\n[C-CORE] Shutdown triggered. Waiting for Lua handshake...\n"); while (atomic_load_explicit(&g_engine.mailbox.lua_finished, memory_order_acquire) == 0) { SLEEP_MS(1); } vmath_thread_join(lua_thread); glfwDestroyWindow(window); glfwTerminate(); printf("[C-CORE] Clean Exit.\n"); return 0; }
-
-AzureAD+HalimOmarZaghdoudi@DESKTOP-BD3FFTI MINGW64 ~/vulkan_engine
 $ ./boot.exe
 [C-CORE] Booting Minified Concurrent Pipeline...
 [LUA-OS-THREAD] Booting Lua VM...
 [LUA VM] Entering Lock-Free Horizon.
 [LUA CO] Bootstrapping Vulkan...
-[LUA CO] Received 2 GLFW Extensions from C.
-[LUA CO] Publishing VkInstance to C. Waiting for Window Surface...
-Segmentation fault         ./boot.exe
+[LUA] Initializing Vulkan Core (Instance Generation)...
+[LUA] Vulkan Instance Created!
+[C-CORE] Validation Layer Enforcer Injected Successfully!
+[LUA CO] Publishing REAL VkInstance to C. Waiting for Window Surface...
+[C-CORE] Window Surface Created & Published to Lua!
+[LUA CO] Window Surface Acquired! Resuming Pipeline Generation...
+[LUA] Resuming Vulkan Setup. Finalizing Logical Device...
+[LUA] Window Surface Linked from Main Thread!
+[LUA] Hardware GPU Selected!
+[LUA] Logical Device Created!
+[DEBUG] Device Pointer in core:         cdata<struct VkDevice_T *>: 0x0226d2ca1938
+[LUA CO] Pipeline Generated! Entering Main Render Loop...
+[LUA CO] Carving Master Arenas...
+[MEMORY] Allocated Pure AVX2 SoA: MASTER_CPU_BLOCK (256.00 MB)
+[LUA CO] CPU Arena Utilization: 67.06%
+[MEMORY] ReBAR Supported! Streaming directly to VRAM.
+[MEMORY] Allocated & Mapped VRAM Buffer: MASTER_GPU_BLOCK
+[LUA CO] GPU Arena Utilization: 67.06%
+[SWAPCHAIN] Building the display chain...
+[SWAPCHAIN] Created successfully with 3 images!
+[LUA CO] Pipeline Generated! Entering Main Render Loop...
+[RENDERER] Bootstrapping Cyan Clear Pipeline...
 
-AzureAD+HalimOmarZaghdoudi@DESKTOP-BD3FFTI MINGW64 ~/vulkan_engine
-$
+[VULKAN LAYER ENFORCER]
+SEVERITY: 4096
+MESSAGE: vkCmdPipelineBarrier(): pImageMemoryBarriers[0].newLayout (VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) is not compatible with VkImage 0x60000000006 usage flags VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT.
+The Vulkan spec states: If layouts are not ignored, oldLayout or newLayout is VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL then image must have been created with the VK_IMAGE_USAGE_TRANSFER_DST_BIT usage flag set (https://docs.vulkan.org/spec/latest/chapters/synchronization.html#VUID-VkImageMemoryBarrier-oldLayout-01213)
+
+
+[LUA FATAL ERROR] main.lua:146: FATAL: COROUTINE CRASHED: .\renderer.lua:63: missing declaration for symbol 'vkCmdClearColorImage'
+[LUA-OS-THREAD] VM Destroyed.
