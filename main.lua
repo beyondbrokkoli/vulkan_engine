@@ -99,7 +99,7 @@ local function vulkan_bootstrap_coroutine()
     -- Setup Pipelines & Descriptors
     local desc_state = descriptors.Init(vk, device, memory.Buffers["MASTER_GPU_BLOCK"])
     local comp_state = compute.Init(vk, device, desc_state.pipelineLayout)
-    local gfx_state = graphics.Init(vk, device, desc_state.pipelineLayout, sc_state.format)
+    local gfx_state = graphics.Init(vk, vk_state, pWidth[0], pHeight[0], desc_state.pipelineLayout, sc_state.format)
 
     -- Command Pool & Synchronization
     local cmdPoolInfo = ffi.new("VkCommandPoolCreateInfo", { sType = 39, flags = 2, queueFamilyIndex = vk_state.qIndex })
@@ -128,10 +128,10 @@ local function vulkan_bootstrap_coroutine()
         vk.vkBeginCommandBuffer(cmd, beginInfo)
 
         -- 1. Dispatch Compute
-        vk.vkCmdBindPipeline(cmd, 32, comp_state.pipeline) -- 32 = VK_PIPELINE_BIND_POINT_COMPUTE
+        vk.vkCmdBindPipeline(cmd, 32, comp_state.pipeline)
         local pSet = ffi.new("VkDescriptorSet[1]", {desc_state.set0})
         vk.vkCmdBindDescriptorSets(cmd, 32, desc_state.pipelineLayout, 0, 1, pSet, 0, nil)
-        vk.vkCmdPushConstants(cmd, desc_state.pipelineLayout, 33, 0, 64, pushConstants) -- 33 = COMPUTE | VERTEX
+        vk.vkCmdPushConstants(cmd, desc_state.pipelineLayout, 33, 0, 64, pushConstants)
         
         local groupCount = math.ceil(PARTICLE_COUNT / 256)
         vk.vkCmdDispatch(cmd, groupCount, 1, 1)
@@ -140,40 +140,58 @@ local function vulkan_bootstrap_coroutine()
         local memBarrier = ffi.new("VkMemoryBarrier", { sType = 46, srcAccessMask = 32, dstAccessMask = 64 })
         vk.vkCmdPipelineBarrier(cmd, 2048, 8, 0, 1, memBarrier, 0, nil, 0, nil)
 
-        -- 3. Transition Image for Rendering
-        local imgBarrierToColor = ffi.new("VkImageMemoryBarrier", {
-            sType = 45, oldLayout = 0, newLayout = 1000044000,
-            srcQueueFamilyIndex = 4294967295, dstQueueFamilyIndex = 4294967295,
-            image = sc_state.images[i],
-            subresourceRange = { aspectMask = 1, baseMipLevel = 0, levelCount = 1, baseArrayLayer = 0, layerCount = 1 },
-            srcAccessMask = 0, dstAccessMask = 256
-        })
-        vk.vkCmdPipelineBarrier(cmd, 1, 1024, 0, 0, nil, 0, nil, 1, imgBarrierToColor)
+        -- 3. Transition Color Image AND Depth Image Layouts
+        local imgBarriers = ffi.new("VkImageMemoryBarrier[2]")
+        
+        imgBarriers[0].sType = 45; imgBarriers[0].oldLayout = 0; imgBarriers[0].newLayout = 1000044000 -- COLOR_ATTACHMENT_OPTIMAL
+        imgBarriers[0].srcQueueFamilyIndex = 4294967295; imgBarriers[0].dstQueueFamilyIndex = 4294967295
+        imgBarriers[0].image = sc_state.images[i]
+        imgBarriers[0].subresourceRange = { aspectMask = 1, baseMipLevel = 0, levelCount = 1, baseArrayLayer = 0, layerCount = 1 }
+        imgBarriers[0].srcAccessMask = 0; imgBarriers[0].dstAccessMask = 256
 
-        -- 4. Dynamic Rendering
+        imgBarriers[1].sType = 45; imgBarriers[1].oldLayout = 0; imgBarriers[1].newLayout = 3 -- DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+        imgBarriers[1].srcQueueFamilyIndex = 4294967295; imgBarriers[1].dstQueueFamilyIndex = 4294967295
+        imgBarriers[1].image = gfx_state.depthImage
+        imgBarriers[1].subresourceRange = { aspectMask = 2, baseMipLevel = 0, levelCount = 1, baseArrayLayer = 0, layerCount = 1 }
+        imgBarriers[1].srcAccessMask = 0; imgBarriers[1].dstAccessMask = 1024 -- DEPTH_STENCIL_ATTACHMENT_WRITE_BIT
+
+        vk.vkCmdPipelineBarrier(cmd, 1, 1024, 0, 0, nil, 0, nil, 2, imgBarriers)
+
+        -- 4. Dynamic Rendering with Depth Attached
         local colorAttachment = ffi.new("VkRenderingAttachmentInfo", {
             sType = 1000044000, imageView = sc_state.imageViews[i], imageLayout = 1000044000,
-            loadOp = 1, storeOp = 0, -- CLEAR / STORE
-            clearValue = { color = { float32 = { 0.05, 0.05, 0.05, 1.0 } } }
+            loadOp = 0, storeOp = 0, -- VK_ATTACHMENT_LOAD_OP_CLEAR / STORE
+            clearValue = { color = { float32 = { 0.02, 0.02, 0.02, 1.0 } } }
         })
+
+        local depthAttachment = ffi.new("VkRenderingAttachmentInfo", {
+            sType = 1000044000, imageView = gfx_state.depthImageView, imageLayout = 3, -- DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+            loadOp = 0, storeOp = 1, -- VK_ATTACHMENT_LOAD_OP_CLEAR / DONT_CARE
+            clearValue = { depthStencil = { depth = 0.0, stencil = 0 } } -- Reverse-Z Clear (0.0)
+        })
+
         local renderingInfo = ffi.new("VkRenderingInfo", {
             sType = 1000044001,
             renderArea = { offset = {0,0}, extent = sc_state.extent },
-            layerCount = 1, colorAttachmentCount = 1, pColorAttachments = colorAttachment
+            layerCount = 1, 
+            colorAttachmentCount = 1, pColorAttachments = colorAttachment,
+            pDepthAttachment = depthAttachment
         })
 
         vk.vkCmdBeginRenderingKHR(cmd, renderingInfo)
         
-        vk.vkCmdBindPipeline(cmd, 0, gfx_state.pipeline) -- 0 = VK_PIPELINE_BIND_POINT_GRAPHICS
+        vk.vkCmdBindPipeline(cmd, 0, gfx_state.pipeline)
+        -- The single unified SSBO is bound exactly once here for the vertex shader
         vk.vkCmdBindDescriptorSets(cmd, 0, desc_state.pipelineLayout, 0, 1, pSet, 0, nil)
         vk.vkCmdPushConstants(cmd, desc_state.pipelineLayout, 33, 0, 64, pushConstants)
 
-        -- Viewport & Scissor (Dynamic)
+        -- Dynamic Viewport & Scissor
         local viewport = ffi.new("VkViewport", { x=0, y=0, width=pWidth[0], height=pHeight[0], minDepth=0, maxDepth=1 })
         local scissor = ffi.new("VkRect2D", { offset={0,0}, extent=sc_state.extent })
         vk.vkCmdSetViewport(cmd, 0, 1, ffi.new("VkViewport[1]", {viewport}))
         vk.vkCmdSetScissor(cmd, 0, 1, ffi.new("VkRect2D[1]", {scissor}))
 
+        -- The Empty Draw Call (Instanceless, Bufferless)
         vk.vkCmdDraw(cmd, PARTICLE_COUNT, 1, 0, 0)
         
         vk.vkCmdEndRenderingKHR(cmd)
