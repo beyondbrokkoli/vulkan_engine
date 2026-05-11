@@ -7,31 +7,26 @@ $ ./boot.exe
 [LUA] Initializing Vulkan Core (Instance Generation)...
 [LUA] Vulkan Instance Created!
 [C-CORE] Validation Layer Enforcer Injected Successfully!
-[LUA CO] Publishing REAL VkInstance to C. Waiting for Window Surface...
 [C-CORE] Window Surface Created & Published to Lua!
-[LUA CO] Window Surface Acquired! Resuming Pipeline Generation...
 [LUA] Resuming Vulkan Setup. Finalizing Logical Device...
 [LUA] Window Surface Linked from Main Thread!
 [LUA] Hardware GPU Selected!
 [LUA] Logical Device Created!
-[DEBUG] Device Pointer in core:         cdata<struct VkDevice_T *>: 0x0226d2ca1938
-[LUA CO] Pipeline Generated! Entering Main Render Loop...
-[LUA CO] Carving Master Arenas...
+[DEBUG] Device Pointer in core:         cdata<struct VkDevice_T *>: 0x01eff3e4d6b8
 [MEMORY] Allocated Pure AVX2 SoA: MASTER_CPU_BLOCK (256.00 MB)
-[LUA CO] CPU Arena Utilization: 67.06%
 [MEMORY] ReBAR Supported! Streaming directly to VRAM.
 [MEMORY] Allocated & Mapped VRAM Buffer: MASTER_GPU_BLOCK
-[LUA CO] GPU Arena Utilization: 67.06%
 [SWAPCHAIN] Building the display chain...
 [SWAPCHAIN] Created successfully with 3 images!
-[LUA CO] Pipeline Generated! Entering Main Render Loop...
-[RENDERER] Bootstrapping Cyan Clear Pipeline...
+[DESCRIPTORS] Wiring Master VRAM Arena as a Unified SSBO...
 
 [VULKAN LAYER ENFORCER]
 SEVERITY: 4096
-MESSAGE: vkCmdPipelineBarrier(): pImageMemoryBarriers[0].newLayout (VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) is not compatible with VkImage 0x60000000006 usage flags VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT.
-The Vulkan spec states: If layouts are not ignored, oldLayout or newLayout is VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL then image must have been created with the VK_IMAGE_USAGE_TRANSFER_DST_BIT usage flag set (https://docs.vulkan.org/spec/latest/chapters/synchronization.html#VUID-VkImageMemoryBarrier-oldLayout-01213)
+MESSAGE: vkUpdateDescriptorSets(): pDescriptorWrites[0].pBufferInfo[0].buffer was created with VK_BUFFER_USAGE_2_TRANSFER_SRC_BIT|VK_BUFFER_USAGE_2_UNIFORM_TEXEL_BUFFER_BIT|VK_BUFFER_USAGE_2_STORAGE_TEXEL_BUFFER_BIT|VK_BUFFER_USAGE_2_UNIFORM_BUFFER_BIT|VK_BUFFER_USAGE_2_VERTEX_BUFFER_BIT, but descriptorType is VK_DESCRIPTOR_TYPE_STORAGE_BUFFER.
+The Vulkan spec states: If descriptorType is VK_DESCRIPTOR_TYPE_STORAGE_BUFFER or VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, the buffer member of each element of pBufferInfo must have been created with the VK_BUFFER_USAGE_STORAGE_BUFFER_BIT usage flag set (https://docs.vulkan.org/spec/latest/chapters/descriptorsets.html#VUID-VkWriteDescriptorSet-descriptorType-00331)
 
+[DESCRIPTORS] Unified Memory Matrix successfully bound!
+[COMPUTE] Compiling Swarm Intelligence...
 
-[LUA FATAL ERROR] main.lua:146: FATAL: COROUTINE CRASHED: .\renderer.lua:63: missing declaration for symbol 'vkCmdClearColorImage'
+[LUA FATAL ERROR] main.lua:247: FATAL: COROUTINE CRASHED: .\compute_pipeline.lua:7: FATAL: Failed to open shader file: swarm_comp.spv
 [LUA-OS-THREAD] VM Destroyed.
