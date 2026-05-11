@@ -195,7 +195,7 @@ function GraphicsPipeline.Init(vk, core_state, width, height, pipelineLayout, co
 
     local pipelineInfo = ffi.new("VkGraphicsPipelineCreateInfo[1]")
     ffi.fill(pipelineInfo, ffi.sizeof(pipelineInfo))
-    pipelineInfo[0].sType = 27 -- VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO
+    pipelineInfo[0].sType = 28 -- STRICT FIX: 28 is VkGraphicsPipelineCreateInfo (27 is Layout)
     pipelineInfo[0].pNext = pipelineRenderingInfo
     pipelineInfo[0].stageCount = 2
     pipelineInfo[0].pStages = shaderStages

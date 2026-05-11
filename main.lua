@@ -36,6 +36,16 @@ typedef struct {
     float dt;
     uint32_t pad[11]; // Total 64 Bytes
 } SwarmPushConstants;
+
+typedef struct {
+    uint32_t vertexCount;
+    uint32_t instanceCount;
+    uint32_t firstVertex;
+    uint32_t firstInstance;
+} VkDrawIndirectCommand;
+
+void vkCmdDrawIndirect(void* commandBuffer, void* buffer, uint64_t offset, uint32_t drawCount, uint32_t stride);
+void vkCmdFillBuffer(void* commandBuffer, void* dstBuffer, uint64_t dstOffset, uint64_t size, uint32_t data);
 ]]
 
 print("[LUA VM] Entering Lock-Free Horizon.")
