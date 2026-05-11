@@ -133,91 +133,145 @@ local function vulkan_bootstrap_coroutine()
     vk.vkCreateSemaphore(device, semInfo, nil, pRendFinish)
     vk.vkCreateFence(device, fenInfo, nil, pInFlight)
 
-    print("[LUA CO] Recording Multi-buffer Command Streams...")
+    print("[LUA CO] Orchestrating Dual-State Indirect Command Streams...")
+
+    -- Allocate Indirect Arguments within the Mega-Buffer
+    local indirect_args = gpu_arena:slice("VkDrawIndirectCommand", sc_state.imageCount)
+    local indirect_base_offset = tonumber(ffi.cast("uintptr_t", indirect_args) - base_addr)
+
     for i = 0, sc_state.imageCount - 1 do
         local cmd = cmdBuffers[i]
         local beginInfo = ffi.new("VkCommandBufferBeginInfo", { sType = 42 })
         vk.vkBeginCommandBuffer(cmd, beginInfo)
+    
+       -- We calculate ping-pong offsets for this specific frame context
+        -- Frame A reads X, writes Y. Frame B reads Y, writes X.
+        local read_offset  = (i % 2 == 0) and x_idx or y_idx
+        local write_offset = (i % 2 == 0) and y_idx or x_idx
+    
+        pushConstants.pos_x_idx = read_offset
+        pushConstants.pos_y_idx = write_offset
+    
+        -- ========================================================
+        -- PHASE 1: TEMPORAL GRID / COMMAND CLEAR
+        -- ========================================================
+        -- Zero out the indirect command block for this specific frame
+        local current_indirect_offset = indirect_base_offset + (i * ffi.sizeof("VkDrawIndirectCommand"))
+        vk.vkCmdFillBuffer(cmd, memory.Buffers["MASTER_GPU_BLOCK"], current_indirect_offset, ffi.sizeof("VkDrawIndirectCommand"), 0)
 
-        -- 1. Dispatch Compute
+        -- Memory Barrier: Fill -> Compute Write
+        local fillBarrier = ffi.new("VkMemoryBarrier", { 
+            sType = 46, 
+            srcAccessMask = 4096, -- VK_ACCESS_TRANSFER_WRITE_BIT
+            dstAccessMask = 32    -- VK_ACCESS_SHADER_WRITE_BIT
+        })
+        vk.vkCmdPipelineBarrier(cmd, 4096, 2048, 0, 1, ffi.new("VkMemoryBarrier[1]", {fillBarrier}), 0, nil, 0, nil)
+
+       -- ========================================================
+        -- PHASE 2: COMPUTE & SWARM DISPATCH
+        -- ========================================================
         vk.vkCmdBindPipeline(cmd, 32, comp_state.pipeline)
         local pSet = ffi.new("VkDescriptorSet[1]", {desc_state.set0})
         vk.vkCmdBindDescriptorSets(cmd, 32, desc_state.pipelineLayout, 0, 1, pSet, 0, nil)
         vk.vkCmdPushConstants(cmd, desc_state.pipelineLayout, 33, 0, 64, pushConstants)
-        
-        local groupCount = math.ceil(PARTICLE_COUNT / 256)
+    
+       local groupCount = math.ceil(PARTICLE_COUNT / 256)
         vk.vkCmdDispatch(cmd, groupCount, 1, 1)
 
-        -- 2. SSBO Memory Barrier (Compute write -> Vertex read)
-        local memBarrier = ffi.new("VkMemoryBarrier", { sType = 46, srcAccessMask = 32, dstAccessMask = 64 })
-        vk.vkCmdPipelineBarrier(cmd, 2048, 8, 0, 1, memBarrier, 0, nil, 0, nil)
+        -- Memory Barrier: Compute Write -> Vertex Read & Indirect Read
+        local memBarrier = ffi.new("VkMemoryBarrier", { 
+            sType = 46, 
+            srcAccessMask = 32,   -- VK_ACCESS_SHADER_WRITE_BIT
+            dstAccessMask = 131136 -- VK_ACCESS_SHADER_READ_BIT (64) | VK_ACCESS_INDIRECT_COMMAND_READ_BIT (131072)
+        })
+        vk.vkCmdPipelineBarrier(cmd, 2048, 264, 0, 1, ffi.new("VkMemoryBarrier[1]", {memBarrier}), 0, nil, 0, nil)
 
-        -- 3. Transition Color Image AND Depth Image Layouts
+        -- ========================================================
+        -- PHASE 3: DYNAMIC GRAPHICS PIPELINE (INDIRECT)
+        -- ========================================================
         local imgBarriers = ffi.new("VkImageMemoryBarrier[2]")
-        
-        imgBarriers[0].sType = 45; imgBarriers[0].oldLayout = 0; imgBarriers[0].newLayout = 1000044000 -- COLOR_ATTACHMENT_OPTIMAL
-        imgBarriers[0].srcQueueFamilyIndex = 4294967295; imgBarriers[0].dstQueueFamilyIndex = 4294967295
+        -- Color Attachment Layout Transition
+        imgBarriers[0].sType = 45
+        imgBarriers[0].oldLayout = 0
+        imgBarriers[0].newLayout = 1000044000 -- VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+        imgBarriers[0].srcQueueFamilyIndex = 4294967295
+        imgBarriers[0].dstQueueFamilyIndex = 4294967295
         imgBarriers[0].image = sc_state.images[i]
         imgBarriers[0].subresourceRange = { aspectMask = 1, baseMipLevel = 0, levelCount = 1, baseArrayLayer = 0, layerCount = 1 }
-        imgBarriers[0].srcAccessMask = 0; imgBarriers[0].dstAccessMask = 256
-
-        imgBarriers[1].sType = 45; imgBarriers[1].oldLayout = 0; imgBarriers[1].newLayout = 3 -- DEPTH_STENCIL_ATTACHMENT_OPTIMAL
-        imgBarriers[1].srcQueueFamilyIndex = 4294967295; imgBarriers[1].dstQueueFamilyIndex = 4294967295
+        imgBarriers[0].srcAccessMask = 0
+        imgBarriers[0].dstAccessMask = 256
+    
+        -- Depth Attachment Layout Transition
+        imgBarriers[1].sType = 45
+        imgBarriers[1].oldLayout = 0
+        imgBarriers[1].newLayout = 3 -- VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+        imgBarriers[1].srcQueueFamilyIndex = 4294967295
+        imgBarriers[1].dstQueueFamilyIndex = 4294967295
         imgBarriers[1].image = gfx_state.depthImage
         imgBarriers[1].subresourceRange = { aspectMask = 2, baseMipLevel = 0, levelCount = 1, baseArrayLayer = 0, layerCount = 1 }
-        imgBarriers[1].srcAccessMask = 0; imgBarriers[1].dstAccessMask = 1024 -- DEPTH_STENCIL_ATTACHMENT_WRITE_BIT
+        imgBarriers[1].srcAccessMask = 0
+        imgBarriers[1].dstAccessMask = 1024
 
         vk.vkCmdPipelineBarrier(cmd, 1, 1024, 0, 0, nil, 0, nil, 2, imgBarriers)
 
-        -- 4. Dynamic Rendering with Depth Attached
         local colorAttachment = ffi.new("VkRenderingAttachmentInfo", {
-            sType = 1000044000, imageView = sc_state.imageViews[i], imageLayout = 1000044000,
-            loadOp = 0, storeOp = 0, -- VK_ATTACHMENT_LOAD_OP_CLEAR / STORE
-            clearValue = { color = { float32 = { 0.02, 0.02, 0.02, 1.0 } } }
+            sType = 1000044000, 
+            imageView = sc_state.imageViews[i], 
+           imageLayout = 1000044000,
+            loadOp = 0, storeOp = 0,
+            clearValue = { color = { float32 = { 0.01, 0.01, 0.02, 1.0 } } }
         })
 
         local depthAttachment = ffi.new("VkRenderingAttachmentInfo", {
-            sType = 1000044000, imageView = gfx_state.depthImageView, imageLayout = 3, -- DEPTH_STENCIL_ATTACHMENT_OPTIMAL
-            loadOp = 0, storeOp = 1, -- VK_ATTACHMENT_LOAD_OP_CLEAR / DONT_CARE
-            clearValue = { depthStencil = { depth = 0.0, stencil = 0 } } -- Reverse-Z Clear (0.0)
+            sType = 1000044000, 
+            imageView = gfx_state.depthImageView, 
+            imageLayout = 3,
+            loadOp = 0, storeOp = 1,
+            clearValue = { depthStencil = { depth = 0.0, stencil = 0 } }
         })
 
         local renderingInfo = ffi.new("VkRenderingInfo", {
             sType = 1000044001,
             renderArea = { offset = {0,0}, extent = sc_state.extent },
-            layerCount = 1, 
-            colorAttachmentCount = 1, pColorAttachments = colorAttachment,
-            pDepthAttachment = depthAttachment
-        })
+            layerCount = 1,
+            colorAttachmentCount = 1, pColorAttachments = ffi.new("VkRenderingAttachmentInfo[1]", {colorAttachment}),
+            pDepthAttachment = ffi.new("VkRenderingAttachmentInfo[1]", {depthAttachment})
+       })
 
-        vk.vkCmdBeginRenderingKHR(cmd, renderingInfo)
-        
+        vk.vkCmdBeginRenderingKHR(cmd, ffi.new("VkRenderingInfo[1]", {renderingInfo}))
         vk.vkCmdBindPipeline(cmd, 0, gfx_state.pipeline)
-        -- The single unified SSBO is bound exactly once here for the vertex shader
-        vk.vkCmdBindDescriptorSets(cmd, 0, desc_state.pipelineLayout, 0, 1, pSet, 0, nil)
-        vk.vkCmdPushConstants(cmd, desc_state.pipelineLayout, 33, 0, 64, pushConstants)
 
-        -- Dynamic Viewport & Scissor
+        -- Rebind descriptor for the Vertex stage to access the unified SSBO
+        vk.vkCmdBindDescriptorSets(cmd, 0, desc_state.pipelineLayout, 0, 1, pSet, 0, nil)
+
+        -- Swap read/write visually for the fragment shader. 
+        -- The vertex shader MUST read from what Compute just wrote (write_offset)
+        local renderPush = ffi.new("SwarmPushConstants", pushConstants)
+        renderPush.pos_x_idx = write_offset
+        vk.vkCmdPushConstants(cmd, desc_state.pipelineLayout, 33, 0, 64, renderPush)
+
         local viewport = ffi.new("VkViewport", { x=0, y=0, width=pWidth[0], height=pHeight[0], minDepth=0, maxDepth=1 })
         local scissor = ffi.new("VkRect2D", { offset={0,0}, extent=sc_state.extent })
         vk.vkCmdSetViewport(cmd, 0, 1, ffi.new("VkViewport[1]", {viewport}))
         vk.vkCmdSetScissor(cmd, 0, 1, ffi.new("VkRect2D[1]", {scissor}))
 
-        -- The Empty Draw Call (Instanceless, Bufferless)
-        vk.vkCmdDraw(cmd, PARTICLE_COUNT, 1, 0, 0)
-        
+        -- STRICT RULE: No vkCmdBindVertexBuffers. Native Indirect routing via Mega-Buffer.
+        vk.vkCmdDrawIndirect(cmd, memory.Buffers["MASTER_GPU_BLOCK"], current_indirect_offset, 1, ffi.sizeof("VkDrawIndirectCommand"))
+
         vk.vkCmdEndRenderingKHR(cmd)
 
-        -- 5. Transition Image for Presentation
         local imgBarrierToPresent = ffi.new("VkImageMemoryBarrier", {
-            sType = 45, oldLayout = 1000044000, newLayout = 1000001002,
+            sType = 45, 
+            oldLayout = 1000044000, 
+            newLayout = 1000001002, -- VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
             srcQueueFamilyIndex = 4294967295, dstQueueFamilyIndex = 4294967295,
             image = sc_state.images[i],
             subresourceRange = { aspectMask = 1, baseMipLevel = 0, levelCount = 1, baseArrayLayer = 0, layerCount = 1 },
-            srcAccessMask = 256, dstAccessMask = 0
+            srcAccessMask = 256, 
+            dstAccessMask = 0
         })
-        vk.vkCmdPipelineBarrier(cmd, 1024, 8192, 0, 0, nil, 0, nil, 1, imgBarrierToPresent)
 
+        vk.vkCmdPipelineBarrier(cmd, 1024, 8192, 0, 0, nil, 0, nil, 1, ffi.new("VkImageMemoryBarrier[1]", {imgBarrierToPresent}))
         vk.vkEndCommandBuffer(cmd)
     end
 
