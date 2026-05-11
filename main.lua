@@ -1,40 +1,57 @@
 local ffi = require("ffi")
+local bit = require("bit")
 local vulkan_core = require("vulkan_core")
+local memory = require("memory")
+local swapchain_core = require("swapchain")
+local descriptors = require("descriptors")
+local compute = require("compute_pipeline")
+local graphics = require("graphics_pipeline")
 
 ffi.cdef[[
-    int vibe_get_is_running();
-    int vibe_publish_and_get_next_buffer();
-    void vibe_trigger_shutdown();
-    void vibe_mark_lua_finished();
+int vibe_get_is_running();
+int vibe_publish_and_get_next_buffer();
+void vibe_trigger_shutdown();
+void vibe_mark_lua_finished();
+const char** vibe_get_glfw_extensions(uint32_t* count);
+void vibe_publish_vk_instance(void* instance);
+void* vibe_get_vk_surface();
+void vibe_publish_render_context(void* ctx);
+void vibe_get_window_size(int* width, int* height);
 
-    // The Handshake Hooks
-    const char** vibe_get_glfw_extensions(uint32_t* count);
-    void vibe_publish_vk_instance(void* instance);
-    void* vibe_get_vk_surface();
-    void vibe_publish_render_context(void* ctx);
-    void vibe_get_window_size(int* width, int* height);
+typedef struct {
+    void* device;
+    void* swapchain;
+    void* queue;
+    void* cmd_buffers;
+    void* image_available;
+    void* render_finished;
+    void* in_flight;
+} RenderContext;
+
+typedef struct {
+    uint32_t pos_x_idx;
+    uint32_t pos_y_idx;
+    uint32_t pos_z_idx;
+    uint32_t particle_count;
+    float dt;
+    uint32_t pad[11]; // Total 64 Bytes
+} SwarmPushConstants;
 ]]
 
 print("[LUA VM] Entering Lock-Free Horizon.")
 local active_coroutines = {}
-local function start_coroutine(func)
-    table.insert(active_coroutines, coroutine.create(func))
-end
-
+local function start_coroutine(func) table.insert(active_coroutines, coroutine.create(func)) end
 local current_write_idx = 2
 
 local function vulkan_bootstrap_coroutine()
     print("[LUA CO] Bootstrapping Vulkan...")
     local vk_state = vulkan_core.create_instance()
     if vk_state.instance == nil then
-        print("[LUA FATAL] Failed to create real Vulkan Instance!")
         ffi.C.vibe_trigger_shutdown()
         return
     end
 
-    print("[LUA CO] Publishing REAL VkInstance to C. Waiting for Window Surface...")
     ffi.C.vibe_publish_vk_instance(vk_state.instance)
-
     local surface_ptr = nil
     while true do
         surface_ptr = ffi.C.vibe_get_vk_surface()
@@ -42,67 +59,164 @@ local function vulkan_bootstrap_coroutine()
         coroutine.yield()
     end
 
-    print("[LUA CO] Window Surface Acquired! Resuming Pipeline Generation...")
     vulkan_core.finalize_device_and_swapchain(vk_state, surface_ptr)
+    local vk = vk_state.vk
+    local device = vk_state.device
 
-    -- ========================================================
-    -- MEMORY ARENAS (The 512MB Slice)
-    -- ========================================================
-    local memory = require("memory")
+    -- Memory Matrix
     local UNIVERSE_SIZE = 256 * 1024 * 1024
-    
+    local PARTICLE_COUNT = 15000000
+
     memory.AllocateSoA("uint8_t", UNIVERSE_SIZE, {"MASTER_CPU_BLOCK"})
     local cpu_arena = memory.CreateArena(memory.AVX_Arrays["MASTER_CPU_BLOCK"], UNIVERSE_SIZE)
-    local pos_x = cpu_arena:slice("float", 15000000)
-    local pos_y = cpu_arena:slice("float", 15000000)
-    local pos_z = cpu_arena:slice("float", 15000000)
+    local pos_x = cpu_arena:slice("float", PARTICLE_COUNT)
+    local pos_y = cpu_arena:slice("float", PARTICLE_COUNT)
+    local pos_z = cpu_arena:slice("float", PARTICLE_COUNT)
 
-    -- VK_BUFFER_USAGE_STORAGE_BUFFER_BIT (29) | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT (128)
-    local usage_flags = bit.bor(29, 128) -- STORAGE | VERTEX
+    local usage_flags = bit.bor(29, 128)
     memory.CreateHostVisibleBuffer("MASTER_GPU_BLOCK", "uint8_t", UNIVERSE_SIZE, usage_flags, vk_state)
     local gpu_arena = memory.CreateArena(memory.Mapped["MASTER_GPU_BLOCK"], UNIVERSE_SIZE)
-    local gpu_pos_x = gpu_arena:slice("float", 15000000)
-    local gpu_pos_y = gpu_arena:slice("float", 15000000)
-    local gpu_pos_z = gpu_arena:slice("float", 15000000)
+    local gpu_pos_x = gpu_arena:slice("float", PARTICLE_COUNT)
+    local gpu_pos_y = gpu_arena:slice("float", PARTICLE_COUNT)
+    local gpu_pos_z = gpu_arena:slice("float", PARTICLE_COUNT)
 
-    -- ========================================================
-    -- SWAPCHAIN INIT
-    -- ========================================================
-    local swapchain_core = require("swapchain")
-    local pWidth = ffi.new("int[1]"); local pHeight = ffi.new("int[1]")
+    -- FFI Pointer Arithmetic -> Float Array Indices
+    local base_addr = ffi.cast("uintptr_t", memory.Mapped["MASTER_GPU_BLOCK"])
+    local x_idx = tonumber(ffi.cast("uintptr_t", gpu_pos_x) - base_addr) / 4
+    local y_idx = tonumber(ffi.cast("uintptr_t", gpu_pos_y) - base_addr) / 4
+    local z_idx = tonumber(ffi.cast("uintptr_t", gpu_pos_z) - base_addr) / 4
+
+    local pushConstants = ffi.new("SwarmPushConstants", {
+        pos_x_idx = x_idx, pos_y_idx = y_idx, pos_z_idx = z_idx, 
+        particle_count = PARTICLE_COUNT, dt = 0.016
+    })
+
+    local pWidth = ffi.new("int[1]")
+    local pHeight = ffi.new("int[1]")
     ffi.C.vibe_get_window_size(pWidth, pHeight)
-    local sc_state = swapchain_core.Init(vk_state.vk, vk_state, pWidth[0], pHeight[0])
+    local sc_state = swapchain_core.Init(vk, vk_state, pWidth[0], pHeight[0])
 
-    -- ========================================================
-    -- [ THE PIPELINE MATRIX PLACEHOLDERS ]
-    -- ========================================================
-    print("[LUA CO] Preparing to build Graphics/Compute Pipelines...")
-    
-    -- TODO 1: local desc_state = require("descriptors").Init(vk_state, gpu_pos_x, gpu_pos_y, ...)
-    -- TODO 2: local compute_state = require("compute_pipeline").Init(vk_state, desc_state)
-    -- TODO 3: local gfx_state = require("graphics_pipeline").Init(vk_state, sc_state)
-    -- TODO 4: local render_ctx = RecordCommandBuffers(vk_state, sc_state, compute_state, gfx_state)
-    -- TODO 5: ffi.C.vibe_publish_render_context(render_ctx)
+    -- Setup Pipelines & Descriptors
+    local desc_state = descriptors.Init(vk, device, memory.Buffers["MASTER_GPU_BLOCK"])
+    local comp_state = compute.Init(vk, device, desc_state.pipelineLayout)
+    local gfx_state = graphics.Init(vk, device, desc_state.pipelineLayout, sc_state.format)
 
-    -- ========================================================
-    -- MAIN ENGINE LOOP
-    -- ========================================================
-    print("[LUA CO] Pipeline Generated! Entering Main Render Loop...")
-    local i = 0
+    -- Command Pool & Synchronization
+    local cmdPoolInfo = ffi.new("VkCommandPoolCreateInfo", { sType = 39, flags = 2, queueFamilyIndex = vk_state.qIndex })
+    local pCmdPool = ffi.new("VkCommandPool[1]")
+    vk.vkCreateCommandPool(device, cmdPoolInfo, nil, pCmdPool)
+
+    local allocInfo = ffi.new("VkCommandBufferAllocateInfo", {
+        sType = 40, commandPool = pCmdPool[0], level = 0, commandBufferCount = sc_state.imageCount
+    })
+    local cmdBuffers = ffi.new("VkCommandBuffer[?]", sc_state.imageCount)
+    vk.vkAllocateCommandBuffers(device, allocInfo, cmdBuffers)
+
+    local semInfo = ffi.new("VkSemaphoreCreateInfo", { sType = 9 })
+    local fenInfo = ffi.new("VkFenceCreateInfo", { sType = 8, flags = 1 }) -- Signaled
+    local pImgAvail = ffi.new("VkSemaphore[1]")
+    local pRendFinish = ffi.new("VkSemaphore[1]")
+    local pInFlight = ffi.new("VkFence[1]")
+    vk.vkCreateSemaphore(device, semInfo, nil, pImgAvail)
+    vk.vkCreateSemaphore(device, semInfo, nil, pRendFinish)
+    vk.vkCreateFence(device, fenInfo, nil, pInFlight)
+
+    print("[LUA CO] Recording Multi-buffer Command Streams...")
+    for i = 0, sc_state.imageCount - 1 do
+        local cmd = cmdBuffers[i]
+        local beginInfo = ffi.new("VkCommandBufferBeginInfo", { sType = 42 })
+        vk.vkBeginCommandBuffer(cmd, beginInfo)
+
+        -- 1. Dispatch Compute
+        vk.vkCmdBindPipeline(cmd, 32, comp_state.pipeline) -- 32 = VK_PIPELINE_BIND_POINT_COMPUTE
+        local pSet = ffi.new("VkDescriptorSet[1]", {desc_state.set0})
+        vk.vkCmdBindDescriptorSets(cmd, 32, desc_state.pipelineLayout, 0, 1, pSet, 0, nil)
+        vk.vkCmdPushConstants(cmd, desc_state.pipelineLayout, 33, 0, 64, pushConstants) -- 33 = COMPUTE | VERTEX
+        
+        local groupCount = math.ceil(PARTICLE_COUNT / 256)
+        vk.vkCmdDispatch(cmd, groupCount, 1, 1)
+
+        -- 2. SSBO Memory Barrier (Compute write -> Vertex read)
+        local memBarrier = ffi.new("VkMemoryBarrier", { sType = 46, srcAccessMask = 32, dstAccessMask = 64 })
+        vk.vkCmdPipelineBarrier(cmd, 2048, 8, 0, 1, memBarrier, 0, nil, 0, nil)
+
+        -- 3. Transition Image for Rendering
+        local imgBarrierToColor = ffi.new("VkImageMemoryBarrier", {
+            sType = 45, oldLayout = 0, newLayout = 1000044000,
+            srcQueueFamilyIndex = 4294967295, dstQueueFamilyIndex = 4294967295,
+            image = sc_state.images[i],
+            subresourceRange = { aspectMask = 1, baseMipLevel = 0, levelCount = 1, baseArrayLayer = 0, layerCount = 1 },
+            srcAccessMask = 0, dstAccessMask = 256
+        })
+        vk.vkCmdPipelineBarrier(cmd, 1, 1024, 0, 0, nil, 0, nil, 1, imgBarrierToColor)
+
+        -- 4. Dynamic Rendering
+        local colorAttachment = ffi.new("VkRenderingAttachmentInfo", {
+            sType = 1000044000, imageView = sc_state.imageViews[i], imageLayout = 1000044000,
+            loadOp = 1, storeOp = 0, -- CLEAR / STORE
+            clearValue = { color = { float32 = { 0.05, 0.05, 0.05, 1.0 } } }
+        })
+        local renderingInfo = ffi.new("VkRenderingInfo", {
+            sType = 1000044001,
+            renderArea = { offset = {0,0}, extent = sc_state.extent },
+            layerCount = 1, colorAttachmentCount = 1, pColorAttachments = colorAttachment
+        })
+
+        vk.vkCmdBeginRenderingKHR(cmd, renderingInfo)
+        
+        vk.vkCmdBindPipeline(cmd, 0, gfx_state.pipeline) -- 0 = VK_PIPELINE_BIND_POINT_GRAPHICS
+        vk.vkCmdBindDescriptorSets(cmd, 0, desc_state.pipelineLayout, 0, 1, pSet, 0, nil)
+        vk.vkCmdPushConstants(cmd, desc_state.pipelineLayout, 33, 0, 64, pushConstants)
+
+        -- Viewport & Scissor (Dynamic)
+        local viewport = ffi.new("VkViewport", { x=0, y=0, width=pWidth[0], height=pHeight[0], minDepth=0, maxDepth=1 })
+        local scissor = ffi.new("VkRect2D", { offset={0,0}, extent=sc_state.extent })
+        vk.vkCmdSetViewport(cmd, 0, 1, ffi.new("VkViewport[1]", {viewport}))
+        vk.vkCmdSetScissor(cmd, 0, 1, ffi.new("VkRect2D[1]", {scissor}))
+
+        vk.vkCmdDraw(cmd, PARTICLE_COUNT, 1, 0, 0)
+        
+        vk.vkCmdEndRenderingKHR(cmd)
+
+        -- 5. Transition Image for Presentation
+        local imgBarrierToPresent = ffi.new("VkImageMemoryBarrier", {
+            sType = 45, oldLayout = 1000044000, newLayout = 1000001002,
+            srcQueueFamilyIndex = 4294967295, dstQueueFamilyIndex = 4294967295,
+            image = sc_state.images[i],
+            subresourceRange = { aspectMask = 1, baseMipLevel = 0, levelCount = 1, baseArrayLayer = 0, layerCount = 1 },
+            srcAccessMask = 256, dstAccessMask = 0
+        })
+        vk.vkCmdPipelineBarrier(cmd, 1024, 8192, 0, 0, nil, 0, nil, 1, imgBarrierToPresent)
+
+        vk.vkEndCommandBuffer(cmd)
+    end
+
+    -- Publish to C via Lock-Free Mailbox
+    local renderCtx = ffi.new("RenderContext", {
+        device = device, swapchain = sc_state.handle, queue = vk_state.queue,
+        cmd_buffers = cmdBuffers,
+        image_available = pImgAvail[0], render_finished = pRendFinish[0], in_flight = pInFlight[0]
+    })
+    ffi.C.vibe_publish_render_context(renderCtx)
+
+    print("[LUA CO] Context Dispatched! Entering Idle Generator Loop...")
     while ffi.C.vibe_get_is_running() == 1 do
-        i = i + 1
         current_write_idx = ffi.C.vibe_publish_and_get_next_buffer()
         coroutine.yield()
     end
 
-    -- ========================================================
-    -- TEARDOWN PROTOCOL
-    -- ========================================================
     print("[LUA CO] Engine Shutdown Detected. Commencing Teardown...")
-    -- TODO: desc_state:Destroy(), compute_state:Destroy(), gfx_state:Destroy()
-    swapchain_core.Destroy(vk_state.vk, vk_state, sc_state)
+    vk.vkDeviceWaitIdle(device)
+    vk.vkDestroySemaphore(device, pImgAvail[0], nil)
+    vk.vkDestroySemaphore(device, pRendFinish[0], nil)
+    vk.vkDestroyFence(device, pInFlight[0], nil)
+    vk.vkDestroyCommandPool(device, pCmdPool[0], nil)
+    
+    graphics.Destroy(vk, vk_state, gfx_state)
+    compute.Destroy(vk, vk_state, comp_state)
+    descriptors.Destroy(vk, device, desc_state)
+    swapchain_core.Destroy(vk, vk_state, sc_state)
     vulkan_core.Destroy(vk_state)
-    print("[LUA CO] Vulkan Destroyed. Coroutine Terminating.")
 end
 
 start_coroutine(vulkan_bootstrap_coroutine)
