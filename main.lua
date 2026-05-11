@@ -1,4 +1,5 @@
-local ffi = require("ffi") 
+local ffi = require("ffi")
+local vulkan_core = require("vulkan_core")
 
 ffi.cdef[[
     int vibe_get_is_running();
