@@ -11,7 +11,7 @@ ffi.cdef[[
     const char** vibe_get_glfw_extensions(uint32_t* count);
     void vibe_publish_vk_instance(void* instance);
     void* vibe_get_vk_surface();
-
+    void vibe_publish_render_context(void* ctx);
     void vibe_get_window_size(int* width, int* height);
 ]]
 
@@ -107,6 +107,11 @@ local function vulkan_bootstrap_coroutine()
 
     print("[LUA CO] Pipeline Generated! Entering Main Render Loop...")
 
+    local renderer = require("renderer")
+    local render_ctx = renderer.InitMinimalCyan(vk_state.vk, vk_state, sc_state)
+
+    -- Ship it across the lock-free bridge to C!
+    ffi.C.vibe_publish_render_context(render_ctx)
     -- ==========================================
     -- THE MAIN RENDER LOOP
     -- ==========================================

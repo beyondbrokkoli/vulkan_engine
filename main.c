@@ -44,7 +44,24 @@ static void vmath_thread_join(vmath_thread_t thread) {
     pthread_join(thread, NULL); 
 } 
 #endif
+// --- VULKAN RENDER CONTEXT ---
+// This is the struct Lua will fill and pass to C
+typedef struct {
+    VkDevice device;
+    VkSwapchainKHR swapchain;
+    VkQueue queue;
+    VkCommandBuffer* cmd_buffers; // Array of pre-recorded command buffers
+    VkSemaphore image_available;
+    VkSemaphore render_finished;
+    VkFence in_flight;
+} RenderContext;
 
+// Add this into your IPC_Mailbox struct:
+// _Atomic(void*) vk_render_context;
+
+EXPORT void vibe_publish_render_context(void* ctx) {
+    atomic_store_explicit(&g_engine.mailbox.vk_render_context, ctx, memory_order_release);
+}
 // --- UPGRADED LOCK-FREE MAILBOX ---
 typedef struct { 
     alignas(64) _Atomic int ready_index; 
@@ -52,7 +69,8 @@ typedef struct {
     _Atomic int lua_finished; 
     // New: Opaque pointers for the Vulkan Handshake
     _Atomic(void*) vk_instance; 
-    _Atomic(void*) vk_surface;  
+    _Atomic(void*) vk_surface;
+    _Atomic(void*) vk_render_context;
 } IPC_Mailbox; 
 
 typedef struct { 
@@ -94,6 +112,9 @@ EXPORT void vibe_publish_vk_instance(void* instance) {
 
 EXPORT void* vibe_get_vk_surface() {
     return atomic_load_explicit(&g_engine.mailbox.vk_surface, memory_order_acquire);
+}
+EXPORT void vibe_publish_render_context(void* ctx) {
+    atomic_store_explicit(&g_engine.mailbox.vk_render_context, ctx, memory_order_release);
 }
 // --- VULKAN VALIDATION LAYER ENFORCER ---
 VkDebugUtilsMessengerEXT g_debugMessenger = VK_NULL_HANDLE;
@@ -216,15 +237,58 @@ int main(int argc, char** argv) {
             }
         }
 
-        vibe_acquire_newest_frame(); 
-        
-        if (frame_count % 30 == 0) { 
-            // printf("[C-RENDER] Drawing from Buffer Index: %d\n", g_engine.render_index); 
-        } 
-        frame_count++; 
-        SLEEP_MS(16); // Throttle until Vulkan V-Sync takes over
-    } 
-    
+        vibe_acquire_newest_frame();
+
+        // Lock-Free Render Execution
+        void* ctx_ptr = atomic_load_explicit(&g_engine.mailbox.vk_render_context, memory_order_acquire);
+        if (ctx_ptr != NULL) {
+            RenderContext* ctx = (RenderContext*)ctx_ptr;
+
+            // 1. Wait for the GPU to finish the last frame
+            vkWaitForFences(ctx->device, 1, &ctx->in_flight, VK_TRUE, UINT64_MAX);
+            vkResetFences(ctx->device, 1, &ctx->in_flight);
+
+            // 2. Grab the next available image from the Swapchain
+            uint32_t imageIndex;
+            vkAcquireNextImageKHR(ctx->device, ctx->swapchain, UINT64_MAX, ctx->image_available, VK_NULL_HANDLE, &imageIndex);
+
+            // 3. Submit Lua's pre-recorded Cyan Command Buffer
+            VkSubmitInfo submitInfo = {0};
+            submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+
+            VkSemaphore waitSemaphores[] = {ctx->image_available};
+            VkPipelineStageFlags waitStages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
+            submitInfo.waitSemaphoreCount = 1;
+            submitInfo.pWaitSemaphores = waitSemaphores;
+            submitInfo.pWaitDstStageMask = waitStages;
+
+            submitInfo.commandBufferCount = 1;
+            submitInfo.pCommandBuffers = &ctx->cmd_buffers[imageIndex]; // The magic index!
+
+            VkSemaphore signalSemaphores[] = {ctx->render_finished};
+            submitInfo.signalSemaphoreCount = 1;
+            submitInfo.pSignalSemaphores = signalSemaphores;
+
+            vkQueueSubmit(ctx->queue, 1, &submitInfo, ctx->in_flight);
+
+            // 4. Push to Monitor (V-Sync)
+            VkPresentInfoKHR presentInfo = {0};
+            presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+            presentInfo.waitSemaphoreCount = 1;
+            presentInfo.pWaitSemaphores = signalSemaphores;
+
+            VkSwapchainKHR swapchains[] = {ctx->swapchain};
+            presentInfo.swapchainCount = 1;
+            presentInfo.pSwapchains = swapchains;
+            presentInfo.pImageIndices = &imageIndex;
+
+            vkQueuePresentKHR(ctx->queue, &presentInfo);
+
+            // We successfully rendered! (No SLEEP_MS needed here, vkQueuePresentKHR blocks for VSync)
+        } else {
+            SLEEP_MS(16); // Throttle CPU while waiting for Lua to build the Render Context
+        }
+    }
     printf("\n[C-CORE] Shutdown triggered. Waiting for Lua handshake...\n"); 
     while (atomic_load_explicit(&g_engine.mailbox.lua_finished, memory_order_acquire) == 0) { 
         SLEEP_MS(1); 
