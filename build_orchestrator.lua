@@ -46,7 +46,7 @@ local function compile_engine(platform)
         -- 2. Added -mavx -mavx2 -mfma for the SIMD math.
         -- 3. Added -lm (Math) and -lpthread (Threading).
         -- 4. Added -Wl,-E (CRITICAL: Tells GCC to expose the executable's functions to LuaJIT FFI).
-        local linux_build = "gcc main.c -O3 -mavx -mavx2 -mfma -Wl,-E -I/usr/include/luajit-2.1 -lglfw -lvulkan -lluajit-5.1 -lm -lpthread -o vulkan-engine"
+        local linux_build = "gcc main.c -O3 -mavx -mavx2 -mfma -Wl,-E -I/usr/include/luajit-2.1 -lglfw -lvulkan -lluajit-5.1 -lm -lpthread -o boot"
         os.execute(linux_build)
 
     elseif platform == "win" then
@@ -66,7 +66,7 @@ local function compile_engine(platform)
 
         -- Injected LUA_INC as the first -I flag
         local win_build = string.format(
-            'gcc main.c -O3 -mavx -mavx2 -mfma -I"%s" -I"%s/Include" -L"%s/Lib" -lws2_32 -lglfw3 -lvulkan-1 -lluajit-5.1 -lm -o vulkan-engine.exe',
+            'gcc main.c -O3 -mavx -mavx2 -mfma -I"%s" -I"%s/Include" -L"%s/Lib" -lws2_32 -lglfw3 -lvulkan-1 -lluajit-5.1 -lm -o boot.exe',
             LUA_INC, VULKAN_SDK_PATH, VULKAN_SDK_PATH
         )
         os.execute(win_build)
