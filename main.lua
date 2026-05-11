@@ -11,6 +11,8 @@ ffi.cdef[[
     const char** vibe_get_glfw_extensions(uint32_t* count);
     void vibe_publish_vk_instance(void* instance);
     void* vibe_get_vk_surface();
+
+    void vibe_get_window_size(int* width, int* height);
 ]]
 
 print("[LUA VM] Entering Lock-Free Horizon.")
@@ -57,26 +59,77 @@ local function vulkan_bootstrap_coroutine()
 
     print("[LUA CO] Pipeline Generated! Entering Main Render Loop...")
 
+    local memory = require("memory")
+
+    -- Define the size of our universe (e.g., 256 MB per Arena)
+    local UNIVERSE_SIZE = 256 * 1024 * 1024
+
+    print("[LUA CO] Carving Master Arenas...")
+
+    -- ========================================================
+    -- 1. THE CPU ARENA (Host RAM for Lua / C AVX2 Physics)
+    -- ========================================================
+    memory.AllocateSoA("uint8_t", UNIVERSE_SIZE, {"MASTER_CPU_BLOCK"})
+    local cpu_arena = memory.CreateArena(memory.AVX_Arrays["MASTER_CPU_BLOCK"], UNIVERSE_SIZE)
+
+    -- Slice out your SoA Arrays! (Perfectly 64-byte aligned)
+    local pos_x = cpu_arena:slice("float", 15000000)
+    local pos_y = cpu_arena:slice("float", 15000000)
+    local pos_z = cpu_arena:slice("float", 15000000)
+    print(string.format("[LUA CO] CPU Arena Utilization: %.2f%%", cpu_arena:get_utilization()))
+
+    -- ========================================================
+    -- 2. THE GPU ARENA (ReBAR VRAM for Compute / Rendering)
+    -- ========================================================
+    -- VK_BUFFER_USAGE_STORAGE_BUFFER_BIT (29) | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT (128)
+    local usage_flags = bit.bor(29, 128)
+
+    memory.CreateHostVisibleBuffer("MASTER_GPU_BLOCK", "uint8_t", UNIVERSE_SIZE, usage_flags, vk_state)
+    local gpu_arena = memory.CreateArena(memory.Mapped["MASTER_GPU_BLOCK"], UNIVERSE_SIZE)
+
+    -- Slice the GPU buffers to match
+    local gpu_pos_x = gpu_arena:slice("float", 15000000)
+    local gpu_pos_y = gpu_arena:slice("float", 15000000)
+    local gpu_pos_z = gpu_arena:slice("float", 15000000)
+    print(string.format("[LUA CO] GPU Arena Utilization: %.2f%%", gpu_arena:get_utilization()))
+
+    -- ==========================================
+    -- 5. INITIALIZE THE SWAPCHAIN
+    -- ==========================================
+    local swapchain_core = require("swapchain")
+
+    -- Ask C for the exact pixel dimensions of the OS Window
+    local pWidth = ffi.new("int[1]")
+    local pHeight = ffi.new("int[1]")
+    ffi.C.vibe_get_window_size(pWidth, pHeight)
+
+    local sc_state = swapchain_core.Init(vk_state.vk, vk_state, pWidth[0], pHeight[0])
+
+    print("[LUA CO] Pipeline Generated! Entering Main Render Loop...")
+
+    -- ==========================================
+    -- THE MAIN RENDER LOOP
+    -- ==========================================
     local i = 0
     while ffi.C.vibe_get_is_running() == 1 do
         i = i + 1
         current_write_idx = ffi.C.vibe_publish_and_get_next_buffer()
-
-        -- [OPTIONAL] Uncomment this if you want the automated 200-frame shutdown testing back.
-        -- Otherwise, the engine runs until you click the OS Window 'X' button!
-        -- if i == 200 then
-        --     print("\n[LUA CO] Reached 200 iterations! Triggering C-Side Teardown...")
-        --     ffi.C.vibe_trigger_shutdown()
-        -- end
-
         coroutine.yield()
     end
 
-    -- [CRITICAL FIX] Clean up Vulkan objects when the engine shuts down!
-    vulkan_core.Destroy(vk_state)
-    print("[LUA CO] Engine Shutdown Detected. Vulkan Destroyed. Coroutine Terminating.")
-end
+    -- ==========================================
+    -- TEARDOWN PROTOCOL
+    -- ==========================================
+    print("[LUA CO] Engine Shutdown Detected. Commencing Teardown...")
 
+    -- Destroy Swapchain FIRST (depends on Device)
+    swapchain_core.Destroy(vk_state.vk, vk_state, sc_state)
+
+    -- Destroy Device/Instance LAST
+    vulkan_core.Destroy(vk_state)
+
+    print("[LUA CO] Vulkan Destroyed. Coroutine Terminating.")
+end
 -- Kick off the bootstrap
 start_coroutine(vulkan_bootstrap_coroutine)
 

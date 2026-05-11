@@ -78,7 +78,7 @@ function core.create_instance()
     print("[LUA] Vulkan Instance Created!")
 
     -- Optional Validation Layer injection (Requires it to exist in main.c)
-    -- ffi.C.vibe_inject_validation_layers(instance)
+    ffi.C.vibe_inject_validation_layers(instance)
 
     -- Return the base state so main.lua can pass the instance to C and yield
     return {
