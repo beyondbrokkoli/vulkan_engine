@@ -57,6 +57,7 @@ local function vulkan_bootstrap_coroutine()
     local pos_y = cpu_arena:slice("float", 15000000)
     local pos_z = cpu_arena:slice("float", 15000000)
 
+    -- VK_BUFFER_USAGE_STORAGE_BUFFER_BIT (29) | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT (128)
     local usage_flags = bit.bor(29, 128) -- STORAGE | VERTEX
     memory.CreateHostVisibleBuffer("MASTER_GPU_BLOCK", "uint8_t", UNIVERSE_SIZE, usage_flags, vk_state)
     local gpu_arena = memory.CreateArena(memory.Mapped["MASTER_GPU_BLOCK"], UNIVERSE_SIZE)
