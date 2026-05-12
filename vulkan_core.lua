@@ -5,6 +5,7 @@ require("vulkan_headers")
 ffi.cdef[[
     const char** vibe_get_glfw_extensions(uint32_t* count);
     void vibe_inject_validation_layers(void* instance);
+    void vibe_eject_validation_layers(void* instance);
 ]]
 
 local vk
@@ -206,6 +207,7 @@ function core.Destroy(vk_state)
 
     -- 3. Destroy the Instance Last
     if vk_state.instance ~= nil then
+        ffi.C.vibe_eject_validation_layers(vk_state.instance)
         vk.vkDestroyInstance(vk_state.instance, nil)
     end
 end

@@ -106,7 +106,17 @@ EXPORT void vibe_inject_validation_layers(void* instance_ptr) {
         printf("[C-FATAL] Failed to setup debug messenger (VK_EXT_debug_utils not found).\n"); 
     } 
 } 
-
+EXPORT void vibe_eject_validation_layers(void* instance) {
+    PFN_vkDestroyDebugUtilsMessengerEXT destroyFn = 
+        (PFN_vkDestroyDebugUtilsMessengerEXT)vkGetInstanceProcAddr(
+            (VkInstance)instance, 
+            "vkDestroyDebugUtilsMessengerEXT"
+        );
+    
+    if (destroyFn != NULL) {
+        destroyFn((VkInstance)instance, g_debugMessenger, NULL);
+    }
+}
 void vibe_init_mailbox() {
     atomic_init(&g_engine.mailbox.ready_index, 0);
     atomic_init(&g_engine.mailbox.is_running, 1);
