@@ -4,289 +4,137 @@
 #include <stdbool.h>
 #include <stdatomic.h>
 #include <stdalign.h>
-
-#define GLFW_INCLUDE_VULKAN
-#include <GLFW/glfw3.h>
 #include <lua.h>
 #include <lualib.h>
 #include <lauxlib.h>
 
 #ifdef _WIN32
-#define EXPORT __declspec(dllexport)
-#include <windows.h>
-#define SLEEP_MS(ms) Sleep(ms)
-typedef HANDLE vmath_thread_t; 
-#define THREAD_FUNC DWORD WINAPI
-#define THREAD_RETURN_VAL 0
-static vmath_thread_t vmath_thread_start(DWORD (WINAPI *func)(LPVOID), void* arg) { 
-    return CreateThread(NULL, 0, func, arg, 0, NULL); 
-} 
-static void vmath_thread_join(vmath_thread_t thread) { 
-    WaitForSingleObject(thread, INFINITE); 
-    CloseHandle(thread); 
-} 
+    #define EXPORT __declspec(dllexport)
+    #include <windows.h>
+    #define SLEEP_MS(ms) Sleep(ms)
+    typedef HANDLE vmath_thread_t;
+    #define THREAD_FUNC DWORD WINAPI
+    #define THREAD_RETURN_VAL 0
+    static vmath_thread_t vmath_thread_start(DWORD (WINAPI *func)(LPVOID), void* arg) { return CreateThread(NULL, 0, func, arg, 0, NULL); }
+    static void vmath_thread_join(vmath_thread_t thread) { WaitForSingleObject(thread, INFINITE); CloseHandle(thread); }
 #else
-#define EXPORT __attribute__((visibility("default")))
-#include <pthread.h>
-#include <unistd.h>
-#define SLEEP_MS(ms) usleep((ms) * 1000)
-typedef pthread_t vmath_thread_t; 
-#define THREAD_FUNC void*
-#define THREAD_RETURN_VAL NULL
-static vmath_thread_t vmath_thread_start(void* (*func)(void*), void* arg) { 
-    pthread_t thread; pthread_create(&thread, NULL, func, arg); return thread; 
-} 
-static void vmath_thread_join(vmath_thread_t thread) { 
-    pthread_join(thread, NULL); 
-} 
+    #define EXPORT __attribute__((visibility("default")))
+    #include <pthread.h>
+    #include <unistd.h>
+    #define SLEEP_MS(ms) usleep((ms) * 1000)
+    typedef pthread_t vmath_thread_t;
+    #define THREAD_FUNC void*
+    #define THREAD_RETURN_VAL NULL
+    static vmath_thread_t vmath_thread_start(void* (*func)(void*), void* arg) { pthread_t thread; pthread_create(&thread, NULL, func, arg); return thread; }
+    static void vmath_thread_join(vmath_thread_t thread) { pthread_join(thread, NULL); }
 #endif
 
-// ==========================================
-// 1. DATA STRUCTURES
-// ==========================================
-typedef struct { 
-    VkDevice device; 
-    VkSwapchainKHR swapchain; 
-    VkQueue queue; 
-    VkCommandBuffer* cmd_buffers; 
-    VkSemaphore image_available; 
-    VkSemaphore render_finished; 
-    VkFence in_flight; 
-} RenderContext; 
+// =====================================================================
+// 1. THE C11 LOCK-FREE TRIPLE-BUFFER MAILBOX
+// =====================================================================
+typedef struct {
+    alignas(64) _Atomic int ready_index;
+    _Atomic int is_running;
+    _Atomic int lua_finished; // The anti-deadlock handshake flag
+} IPC_Mailbox;
 
-typedef struct { 
-    alignas(64) _Atomic int ready_index; 
-    _Atomic int is_running; 
-    _Atomic int lua_finished; 
-    _Atomic(void*) vk_instance; 
-    _Atomic(void*) vk_surface; 
-    _Atomic(void*) vk_render_context; // THE NEW LOCK-FREE POINTER
-} IPC_Mailbox; 
+typedef struct {
+    IPC_Mailbox mailbox;
+    int render_index;
+    int write_index;
+} EngineState;
 
-typedef struct { 
-    IPC_Mailbox mailbox; 
-    int render_index; 
-    int write_index; 
-} EngineState; 
+static EngineState g_engine;
 
-static EngineState g_engine; 
+// --- OPAQUE C89 API FOR LUA FFI ---
+EXPORT int vibe_get_is_running() {
+    return atomic_load_explicit(&g_engine.mailbox.is_running, memory_order_relaxed);
+}
 
-// ==========================================
-// 2. FFI EXPORTS (Now that g_engine exists!)
-// ==========================================
-EXPORT int vibe_get_is_running() { 
-    return atomic_load_explicit(&g_engine.mailbox.is_running, memory_order_relaxed); 
-} 
+EXPORT int vibe_publish_and_get_next_buffer() {
+    g_engine.write_index = atomic_exchange_explicit(
+        &g_engine.mailbox.ready_index,
+        g_engine.write_index,
+        memory_order_release
+    );
+    return g_engine.write_index;
+}
 
-EXPORT int vibe_publish_and_get_next_buffer() { 
-    g_engine.write_index = atomic_exchange_explicit( 
-        &g_engine.mailbox.ready_index, g_engine.write_index, memory_order_release 
-    ); 
-    return g_engine.write_index; 
-} 
+EXPORT void vibe_trigger_shutdown() {
+    atomic_store_explicit(&g_engine.mailbox.is_running, 0, memory_order_release);
+}
 
-EXPORT void vibe_trigger_shutdown() { 
-    atomic_store_explicit(&g_engine.mailbox.is_running, 0, memory_order_release); 
-} 
+EXPORT void vibe_mark_lua_finished() {
+    atomic_store_explicit(&g_engine.mailbox.lua_finished, 1, memory_order_release);
+}
 
-EXPORT void vibe_mark_lua_finished() { 
-    atomic_store_explicit(&g_engine.mailbox.lua_finished, 1, memory_order_release); 
-} 
+// --- INTERNAL C ROUTINES ---
+void vibe_init_mailbox() {
+    atomic_init(&g_engine.mailbox.ready_index, 0);
+    atomic_init(&g_engine.mailbox.is_running, 1);
+    atomic_init(&g_engine.mailbox.lua_finished, 0);
+    g_engine.render_index = 1;
+    g_engine.write_index = 2;
+}
 
-EXPORT const char** vibe_get_glfw_extensions(uint32_t* count) { 
-    return glfwGetRequiredInstanceExtensions(count); 
-} 
+void vibe_acquire_newest_frame() {
+    g_engine.render_index = atomic_exchange_explicit(
+        &g_engine.mailbox.ready_index,
+        g_engine.render_index,
+        memory_order_acquire
+    );
+}
 
-EXPORT void vibe_publish_vk_instance(void* instance) { 
-    atomic_store_explicit(&g_engine.mailbox.vk_instance, instance, memory_order_release); 
-} 
+// =====================================================================
+// 2. MAIN ENTRY POINT
+// =====================================================================
+THREAD_FUNC lua_co_overlord_loop(void* arg) {
+    printf("[LUA-OS-THREAD] Booting Lua VM...\n");
+    lua_State* L = luaL_newstate();
+    luaL_openlibs(L);
+    if (luaL_dofile(L, "main.lua") != LUA_OK) {
+        printf("\n[LUA FATAL ERROR] %s\n", lua_tostring(L, -1));
+    }
+    lua_close(L);
+    printf("[LUA-OS-THREAD] VM Destroyed.\n");
+    return THREAD_RETURN_VAL;
+}
 
-EXPORT void* vibe_get_vk_surface() { 
-    return atomic_load_explicit(&g_engine.mailbox.vk_surface, memory_order_acquire); 
-} 
+int main(int argc, char** argv) {
+    printf("[C-CORE] Booting Minified Concurrent Pipeline...\n");
 
-EXPORT void vibe_publish_render_context(void* ctx) { 
-    atomic_store_explicit(&g_engine.mailbox.vk_render_context, ctx, memory_order_release); 
-} 
+    vibe_init_mailbox();
 
-EXPORT void vibe_get_window_size(int* width, int* height) { 
-    *width = 1280; 
-    *height = 720; 
-} 
+    // Spawn the Lua thread
+    vmath_thread_t lua_thread = vmath_thread_start(lua_co_overlord_loop, NULL);
 
-// ==========================================
-// 3. VULKAN VALIDATION LAYER ENFORCER
-// ==========================================
-VkDebugUtilsMessengerEXT g_debugMessenger = VK_NULL_HANDLE; 
+    int frame_count = 0;
 
-static VKAPI_ATTR VkBool32 VKAPI_CALL vulkan_debug_callback( 
-    VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity, 
-    VkDebugUtilsMessageTypeFlagsEXT messageType, 
-    const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData, 
-    void* pUserData) { 
-        
-    if (messageSeverity < VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) { 
-        return VK_FALSE; 
-    } 
-    printf("\n[VULKAN LAYER ENFORCER]\nSEVERITY: %d\nMESSAGE: %s\n\n", 
-           messageSeverity, pCallbackData->pMessage); 
-    fflush(stdout); 
-    return VK_FALSE; 
-} 
+    // THE SIMULATED RENDER LOOP
+    while (vibe_get_is_running()) {
+        // 1. Grab newest frame from Lua
+        vibe_acquire_newest_frame();
 
-EXPORT void vibe_inject_validation_layers(void* instance_ptr) { 
-    VkInstance instance = (VkInstance)instance_ptr; 
-    VkDebugUtilsMessengerCreateInfoEXT createInfo = {0}; 
-    createInfo.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT; 
-    createInfo.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT | 
-                                 VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | 
-                                 VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT; 
-    createInfo.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | 
-                             VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT | 
-                             VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT; 
-    createInfo.pfnUserCallback = vulkan_debug_callback; 
-    
-    PFN_vkCreateDebugUtilsMessengerEXT func = (PFN_vkCreateDebugUtilsMessengerEXT) 
-        glfwGetInstanceProcAddress(instance, "vkCreateDebugUtilsMessengerEXT"); 
-        
-    if (func != NULL) { 
-        func(instance, &createInfo, NULL, &g_debugMessenger); 
-        printf("[C-CORE] Validation Layer Enforcer Injected Successfully!\n"); 
-    } else { 
-        printf("[C-FATAL] Failed to setup debug messenger (VK_EXT_debug_utils not found).\n"); 
-    } 
-} 
+        // 2. Simulate Rendering Work
+        if (frame_count % 30 == 0) {
+            printf("[C-RENDER] Drawing from Buffer Index: %d\n", g_engine.render_index);
+        }
+        frame_count++;
 
-// ==========================================
-// 4. ENGINE LIFECYCLE
-// ==========================================
-void vibe_init_mailbox() { 
-    atomic_init(&g_engine.mailbox.ready_index, 0); 
-    atomic_init(&g_engine.mailbox.is_running, 1); 
-    atomic_init(&g_engine.mailbox.lua_finished, 0); 
-    atomic_init(&g_engine.mailbox.vk_instance, NULL); 
-    atomic_init(&g_engine.mailbox.vk_surface, NULL); 
-    atomic_init(&g_engine.mailbox.vk_render_context, NULL); // ADDED!
-    g_engine.render_index = 1; 
-    g_engine.write_index = 2; 
-} 
+        // 3. Sleep ~16ms to simulate a 60FPS V-Sync (and save your CPU)
+        SLEEP_MS(16);
+    }
 
-void vibe_acquire_newest_frame() { 
-    g_engine.render_index = atomic_exchange_explicit( 
-        &g_engine.mailbox.ready_index, g_engine.render_index, memory_order_acquire 
-    ); 
-} 
+    printf("\n[C-CORE] Shutdown triggered. Waiting for Lua handshake...\n");
 
-THREAD_FUNC lua_co_overlord_loop(void* arg) { 
-    printf("[LUA-OS-THREAD] Booting Lua VM...\n"); 
-    lua_State* L = luaL_newstate(); 
-    luaL_openlibs(L); 
-    if (luaL_dofile(L, "main.lua") != LUA_OK) { 
-        printf("\n[LUA FATAL ERROR] %s\n", lua_tostring(L, -1)); 
-    } 
-    lua_close(L); 
-    printf("[LUA-OS-THREAD] VM Destroyed.\n"); 
-    return THREAD_RETURN_VAL; 
-} 
+    // The Anti-Deadlock Spin-Wait
+    while (atomic_load_explicit(&g_engine.mailbox.lua_finished, memory_order_acquire) == 0) {
+        SLEEP_MS(1); // Non-blocking wait
+    }
 
-// ==========================================
-// 5. THE C-THREAD ENTRY POINT
-// ==========================================
-int main(int argc, char** argv) { 
-    printf("[C-CORE] Booting Minified Concurrent Pipeline...\n"); 
-    
-    if (!glfwInit()) return -1; 
-    glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API); 
-    glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE); 
-    GLFWwindow* window = glfwCreateWindow(1280, 720, "Lock-Free Swarm", NULL, NULL); 
-    
-    vibe_init_mailbox(); 
-    vmath_thread_t lua_thread = vmath_thread_start(lua_co_overlord_loop, NULL); 
-    
-    int frame_count = 0; 
-    bool surface_created = false; 
-    
-    while (vibe_get_is_running()) { 
-        glfwPollEvents(); 
-        if (glfwWindowShouldClose(window)) { 
-            vibe_trigger_shutdown(); 
-        } 
-        
-        // --- SURFACE HANDSHAKE ---
-        if (!surface_created) { 
-            void* instance = atomic_load_explicit(&g_engine.mailbox.vk_instance, memory_order_acquire); 
-            if (instance != NULL) { 
-                VkSurfaceKHR surface; 
-                if (glfwCreateWindowSurface((VkInstance)instance, window, NULL, &surface) == VK_SUCCESS) { 
-                    atomic_store_explicit(&g_engine.mailbox.vk_surface, (void*)surface, memory_order_release); 
-                    surface_created = true; 
-                    printf("[C-CORE] Window Surface Created & Published to Lua!\n"); 
-                } else { 
-                    printf("[C-FATAL] Failed to create Vulkan Surface.\n"); 
-                    vibe_trigger_shutdown(); 
-                } 
-            } 
-        } 
-        
-        vibe_acquire_newest_frame(); 
-        
-        // --- RENDER CONTEXT HANDSHAKE ---
-        void* ctx_ptr = atomic_load_explicit(&g_engine.mailbox.vk_render_context, memory_order_acquire); 
-        if (ctx_ptr != NULL) { 
-            RenderContext* ctx = (RenderContext*)ctx_ptr; 
-            
-            // 1. Wait for GPU
-            vkWaitForFences(ctx->device, 1, &ctx->in_flight, VK_TRUE, UINT64_MAX); 
-            vkResetFences(ctx->device, 1, &ctx->in_flight); 
-            
-            // 2. Acquire Image
-            uint32_t imageIndex; 
-            vkAcquireNextImageKHR(ctx->device, ctx->swapchain, UINT64_MAX, ctx->image_available, VK_NULL_HANDLE, &imageIndex); 
-            
-            // 3. Submit
-            VkSubmitInfo submitInfo = {0}; 
-            submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO; 
-            
-            VkSemaphore waitSemaphores[] = {ctx->image_available}; 
-            VkPipelineStageFlags waitStages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT}; 
-            submitInfo.waitSemaphoreCount = 1; 
-            submitInfo.pWaitSemaphores = waitSemaphores; 
-            submitInfo.pWaitDstStageMask = waitStages; 
-            
-            submitInfo.commandBufferCount = 1; 
-            submitInfo.pCommandBuffers = &ctx->cmd_buffers[imageIndex]; 
-            
-            VkSemaphore signalSemaphores[] = {ctx->render_finished}; 
-            submitInfo.signalSemaphoreCount = 1; 
-            submitInfo.pSignalSemaphores = signalSemaphores; 
-            
-            vkQueueSubmit(ctx->queue, 1, &submitInfo, ctx->in_flight); 
-            
-            // 4. Present (VSync Block)
-            VkPresentInfoKHR presentInfo = {0}; 
-            presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR; 
-            presentInfo.waitSemaphoreCount = 1; 
-            presentInfo.pWaitSemaphores = signalSemaphores; 
-            
-            VkSwapchainKHR swapchains[] = {ctx->swapchain}; 
-            presentInfo.swapchainCount = 1; 
-            presentInfo.pSwapchains = swapchains; 
-            presentInfo.pImageIndices = &imageIndex; 
-            
-            vkQueuePresentKHR(ctx->queue, &presentInfo); 
-        } else { 
-            SLEEP_MS(16); // Throttle CPU while waiting for Lua to build the Context
-        } 
-    } 
-    
-    printf("\n[C-CORE] Shutdown triggered. Waiting for Lua handshake...\n"); 
-    while (atomic_load_explicit(&g_engine.mailbox.lua_finished, memory_order_acquire) == 0) { 
-        SLEEP_MS(1); 
-    } 
-    
-    vmath_thread_join(lua_thread); 
-    glfwDestroyWindow(window); 
-    glfwTerminate(); 
-    printf("[C-CORE] Clean Exit.\n"); 
-    return 0; 
+    // Handshake received. Safe to reel in the thread.
+    vmath_thread_join(lua_thread);
+
+    printf("[C-CORE] Clean Exit.\n");
+    return 0;
 }
