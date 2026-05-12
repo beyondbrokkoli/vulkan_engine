@@ -31,14 +31,14 @@ local function phase_three_bootstrap()
         if surface_ptr ~= nil then break end
         coroutine.yield()
     end
-    
+
     vulkan_core.finalize_device_and_swapchain(vk_state, surface_ptr)
     local vk = vk_state.vk
     local device = vk_state.device
 
     -- Memory Subsystem
     local UNIVERSE_SIZE = 256 * 1024 * 1024
-    local usage_flags = bit.bor(32, 128) -- STORAGE_BUFFER | INDIRECT_BUFFER
+    local usage_flags = bit.bor(32, 256); -- STORAGE + INDIRECT
     memory.CreateHostVisibleBuffer("MASTER_GPU_BLOCK", "uint8_t", UNIVERSE_SIZE, usage_flags, vk_state)
 
     -- Viewport constraints
