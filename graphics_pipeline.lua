@@ -183,7 +183,7 @@ function GraphicsPipeline.Init(vk, core_state, width, height, pipelineLayout, co
     -- ========================================================
     local colorFormats = ffi.new("int32_t[1]", {colorFormat})
 
-    local dynamicStates = ffi.new("int32_t[2]", { 5, 6 }) -- VK_DYNAMIC_STATE_VIEWPORT & SCISSOR
+    local dynamicStates = ffi.new("int32_t[2]", { 0, 1 });
 
     local dynamicStateInfo = ffi.new("VkPipelineDynamicStateCreateInfo", {
         sType = 27, -- STRICT FIX: 27 is VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO
