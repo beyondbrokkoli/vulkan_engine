@@ -54,7 +54,11 @@ EXPORT void vibe_mark_lua_finished() { atomic_store_explicit(&g_engine.mailbox.l
 EXPORT const char** vibe_get_glfw_extensions(uint32_t* count) { return glfwGetRequiredInstanceExtensions(count); }
 EXPORT void vibe_publish_vk_instance(void* instance) { atomic_store_explicit(&g_engine.mailbox.vk_instance, instance, memory_order_release); }
 EXPORT void* vibe_get_vk_surface() { return atomic_load_explicit(&g_engine.mailbox.vk_surface, memory_order_acquire); }
-
+// INJECT THIS BLOCK
+EXPORT void vibe_get_window_size(int* width, int* height) { 
+    *width = 1280; 
+    *height = 720; 
+}
 void vibe_init_mailbox() {
     atomic_init(&g_engine.mailbox.ready_index, 0);
     atomic_init(&g_engine.mailbox.is_running, 1);
