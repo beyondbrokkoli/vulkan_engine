@@ -14,7 +14,7 @@ $ ./boot.exe
 
 [C-CORE] Shutdown triggered. Waiting for Lua VM...
 [LUA] Logical Device Created!
-[DEBUG] Device Pointer in core:         cdata<struct VkDevice_T *>: 0x01f4fb7b29d8
+[DEBUG] Device Pointer in core:         cdata<struct VkDevice_T *>: 0x019ffabbe888
 [MEMORY] ReBAR Supported! Streaming directly to VRAM.
 [MEMORY] Allocated & Mapped VRAM Buffer: MASTER_GPU_BLOCK (256.00 MB)
 [SWAPCHAIN] Building the display chain...
@@ -24,16 +24,14 @@ $ ./boot.exe
 [COMPUTE] Compiling Swarm Intelligence...
 [COMPUTE] Swarm Pipeline Ready!
 [GRAPHICS] Building Reverse-Z Depth Buffer and Shader Modules...
+[GRAPHICS] Swarm Pipeline Successfully Compiled!
+[LUA CO] Phase 3 Pipeline Handshake Complete! Triggering Safe Shutdown...
+[TEARDOWN] Destroying Graphics Pipeline & Depth Buffer...
+[TEARDOWN] Destroying Compute Pipeline...
+[TEARDOWN] Deconstructing Descriptors...
+[TEARDOWN] Destroying Swapchain & Image Views...
+[TEARDOWN] Shutting down Vulkan Core...
 
-[VULKAN LAYER ENFORCER]
-SEVERITY: 4096
-MESSAGE: vkCreateGraphicsPipelines(): pCreateInfos[0].pViewportState->pViewports is NULL, but the viewport state is not dynamic.
-The Vulkan spec states: If the pipeline requires pre-rasterization shader state, and pViewportState->pViewports is not dynamic, then pViewportState->pViewports must be a valid pointer to an array of pViewportState->viewportCount valid VkViewport structures (https://docs.vulkan.org/spec/latest/chapters/pipelines.html#VUID-VkGraphicsPipelineCreateInfo-pDynamicStates-04130)
+[LUA FATAL ERROR] main.lua:74: FATAL: COROUTINE CRASHED: .\vulkan_core.lua:204: missing declaration for symbol 'vkDestroySurfaceKHR'
+[LUA-OS-THREAD] VM Destroyed.
 
-
-[VULKAN LAYER ENFORCER]
-SEVERITY: 4096
-MESSAGE: vkCreateGraphicsPipelines(): pCreateInfos[0].pViewportState->pScissors is NULL, but the scissor state is not dynamic.
-The Vulkan spec states: If the pipeline requires pre-rasterization shader state, and pViewportState->pScissors is not dynamic, then pViewportState->pScissors must be a valid pointer to an array of pViewportState->scissorCount VkRect2D structures (https://docs.vulkan.org/spec/latest/chapters/pipelines.html#VUID-VkGraphicsPipelineCreateInfo-pDynamicStates-04131)
-
-Segmentation fault         ./boot.exe
