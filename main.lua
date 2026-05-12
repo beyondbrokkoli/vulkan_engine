@@ -1,5 +1,7 @@
 local ffi = require("ffi")
+local bit = require("bit")
 local vulkan_core = require("vulkan_core")
+local memory = require("memory")
 
 ffi.cdef[[
     int vibe_get_is_running();
@@ -15,7 +17,7 @@ print("[LUA VM] Entering Lock-Free Horizon.")
 local active_coroutines = {}
 local function start_coroutine(func) table.insert(active_coroutines, coroutine.create(func)) end
 
-local function phase_one_bootstrap()
+local function phase_two_bootstrap()
     print("[LUA CO] Bootstrapping Vulkan Instance...")
     local vk_state = vulkan_core.create_instance()
     
@@ -30,23 +32,30 @@ local function phase_one_bootstrap()
     local surface_ptr = nil
     while ffi.C.vibe_get_is_running() == 1 do
         surface_ptr = ffi.C.vibe_get_vk_surface()
-        if surface_ptr ~= nil then
-            print(string.format("[LUA CO] Surface Acquired: %s", tostring(surface_ptr)))
-            break
-        end
+        if surface_ptr ~= nil then break end
         coroutine.yield()
     end
     
-    -- Idle until C-Core triggers shutdown
-    while ffi.C.vibe_get_is_running() == 1 do
-        coroutine.yield()
-    end
+    -- Finalize logical device via Candidate Vulkan Core
+    vulkan_core.finalize_device_and_swapchain(vk_state, surface_ptr)
+
+    -- Memory Matrix Allocation
+    local UNIVERSE_SIZE = 256 * 1024 * 1024 -- 256MB
+    memory.AllocateSoA("uint8_t", UNIVERSE_SIZE, {"MASTER_CPU_BLOCK"})
     
-    print("[LUA CO] Teardown Detected. Destroying Instance...")
+    local usage_flags = bit.bor(32, 128) -- VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT
+    memory.CreateHostVisibleBuffer("MASTER_GPU_BLOCK", "uint8_t", UNIVERSE_SIZE, usage_flags, vk_state)
+
+    print("[LUA CO] Phase 2 Memory Handshake Complete. Triggering Shutdown...")
+    ffi.C.vibe_trigger_shutdown()
+
+    -- Teardown
+    memory.DestroyBuffer("MASTER_GPU_BLOCK", vk_state)
+    memory.FreeSoA({"MASTER_CPU_BLOCK"})
     vulkan_core.Destroy(vk_state)
 end
 
-start_coroutine(phase_one_bootstrap)
+start_coroutine(phase_two_bootstrap)
 
 while ffi.C.vibe_get_is_running() == 1 do
     for i = #active_coroutines, 1, -1 do
