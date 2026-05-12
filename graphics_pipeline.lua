@@ -183,9 +183,10 @@ function GraphicsPipeline.Init(vk, core_state, width, height, pipelineLayout, co
 
     local dynamicStates = ffi.new("int32_t[2]", { 5, 6 }) -- VK_DYNAMIC_STATE_VIEWPORT & SCISSOR
     local dynamicStateInfo = ffi.new("VkPipelineDynamicStateCreateInfo", {
-        sType = 28, dynamicStateCount = 2, pDynamicStates = dynamicStates
+        sType = 27, -- VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO
+        dynamicStateCount = 2,
+        pDynamicStates = dynamicStates
     })
-
     local pipelineRenderingInfo = ffi.new("VkPipelineRenderingCreateInfo")
     ffi.fill(pipelineRenderingInfo, ffi.sizeof(pipelineRenderingInfo))
     pipelineRenderingInfo.sType = 1000044002 -- VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO
