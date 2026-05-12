@@ -1,4 +1,3 @@
-AzureAD+HalimOmarZaghdoudi@DESKTOP-BD3FFTI MINGW64 ~/vulkan_engine
 $ ./boot.exe
 [C-CORE] Booting Minified Concurrent Pipeline...
 [LUA-OS-THREAD] Booting Lua VM...
@@ -12,39 +11,6 @@ $ ./boot.exe
 [LUA] Window Surface Linked from Main Thread!
 [LUA] Hardware GPU Selected!
 [LUA] Logical Device Created!
-[DEBUG] Device Pointer in core:         cdata<struct VkDevice_T *>: 0x015382745268
+[DEBUG] Device Pointer in core:         cdata<struct VkDevice_T *>: 0x0222d7af7a38
 [MEMORY] Allocated Pure AVX2 SoA: MASTER_CPU_BLOCK (256.00 MB)
-[MEMORY] ReBAR Supported! Streaming directly to VRAM.
-[MEMORY] Allocated & Mapped VRAM Buffer: MASTER_GPU_BLOCK
-[SWAPCHAIN] Building the display chain...
-[SWAPCHAIN] Created successfully with 3 images!
-[DESCRIPTORS] Wiring Master VRAM Arena as a Unified SSBO...
-[DESCRIPTORS] Unified Memory Matrix successfully bound!
-[COMPUTE] Compiling Swarm Intelligence...
-[COMPUTE] Swarm Pipeline Ready!
-[GRAPHICS] Building Reverse-Z Depth Buffer and Shader Modules...
 
-[VULKAN LAYER ENFORCER]
-SEVERITY: 4096
-MESSAGE: vkCreateGraphicsPipelines(): pCreateInfos[0].sType must be VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO.
-The Vulkan spec states: sType must be VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO (https://docs.vulkan.org/spec/latest/chapters/pipelines.html#VUID-VkGraphicsPipelineCreateInfo-sType-sType)
-
-
-[VULKAN LAYER ENFORCER]
-SEVERITY: 4096
-MESSAGE: vkCreateGraphicsPipelines(): pCreateInfos[0].pDynamicState->sType must be VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO.
-The Vulkan spec states: sType must be VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO (https://docs.vulkan.org/spec/latest/chapters/pipelines.html#VUID-VkPipelineDynamicStateCreateInfo-sType-sType)
-
-
-[VULKAN LAYER ENFORCER]
-SEVERITY: 4096
-MESSAGE: vkCreateGraphicsPipelines(): pCreateInfos[0].pViewportState->pViewports is NULL, but the viewport state is not dynamic.
-The Vulkan spec states: If the pipeline requires pre-rasterization shader state, and pViewportState->pViewports is not dynamic, then pViewportState->pViewports must be a valid pointer to an array of pViewportState->viewportCount valid VkViewport structures (https://docs.vulkan.org/spec/latest/chapters/pipelines.html#VUID-VkGraphicsPipelineCreateInfo-pDynamicStates-04130)
-
-
-[VULKAN LAYER ENFORCER]
-SEVERITY: 4096
-MESSAGE: vkCreateGraphicsPipelines(): pCreateInfos[0].pViewportState->pScissors is NULL, but the scissor state is not dynamic.
-The Vulkan spec states: If the pipeline requires pre-rasterization shader state, and pViewportState->pScissors is not dynamic, then pViewportState->pScissors must be a valid pointer to an array of pViewportState->scissorCount VkRect2D structures (https://docs.vulkan.org/spec/latest/chapters/pipelines.html#VUID-VkGraphicsPipelineCreateInfo-pDynamicStates-04131)
-
-Segmentation fault         ./boot.exe
